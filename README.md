@@ -1,6 +1,6 @@
 # Transcriptional analysis
 
-##Overview
+## Overview
 The process outlined here is composed of two major parts:
 1) Processing the raw RNA seq reads into a count table
 2) Using the count table to carry out differential expression analysis
