@@ -1,7 +1,8 @@
 # Analyzing the HSAEC1-KT Data
 
 ## Generating the count table
-###1) Download and prepare reference files if you have not already done so
+
+### 1) Download and prepare reference files if you have not already done so
 #### Retrieve and unzip the reference genome 
 ```
 cd /local/projects-t3/EFUNG/riley.risteen
@@ -32,13 +33,13 @@ wget https://ftp.ncbi.nlm.nih.gov/refseq/H_sapiens/annotation/GRCh38_latest/refs
 gunzip /local/projects-t3/EFUNG/riley.risteen/GRCh38_latest_genomic.gtf.gz
 ```
 
-###2) Create a list of file paths to sequences and name it list_of_samples_untrimmed
+### 2) Create a list of file paths to sequences and name it list_of_samples_untrimmed
 Each sample will have several sequence files within its folder. Identify just the part of the file names that are shared by all files for that sample. For each sample, include the absolute file path and just the part of the file name that is common between all seq files for that sample. Then, write a comma and add a sample name for that sequence file. 
 ![image](https://github.com/user-attachments/assets/02bd0e05-8dba-4686-b995-0c72d8823fa4)
 
 
 
-###3) Use trimmomatic to trim the reads for each sample
+### 3) Use trimmomatic to trim the reads for each sample
 Run **trim_reads_v2.sh**
 
 Note: this will automatically create a list of of file paths to your trimmed reads
@@ -104,7 +105,7 @@ sort -u -o ${SAMPLES}_trimmed{,}
 
 ```
 
-###4) Use FastQC to assess trimmed reads
+### 4) Use FastQC to assess trimmed reads
 Run **fastqc_reads_v2.sh** 
 ```
 #!/bin/bash
@@ -147,7 +148,7 @@ done
 ```
 Check the quality of the reads before continuing on.
 
-###5) Align reads to reference genome using HISAT2
+### 5) Align reads to reference genome using HISAT2
 Run **align_reads.sh**
 ```
 #!/bin/bash
@@ -184,7 +185,7 @@ for SAMPLE in $(cat ${SAMPLES}); do
 done
 ```
 
-###6) Use HTSeq to create a counts file for each sample
+### 6) Use HTSeq to create a counts file for each sample
 Run **generate_counts.sh**
 ```
 #!/bin/bash
@@ -212,7 +213,7 @@ for SAMPLE in $(cat ${SAMPLES}); do
 done
 ```
 
-###7) Create a single file containing the counts from all samples
+### 7) Create a single file containing the counts from all samples
 Run **generate_ master_count_table_v2.sh**
 ```
 #!/bin/bash
