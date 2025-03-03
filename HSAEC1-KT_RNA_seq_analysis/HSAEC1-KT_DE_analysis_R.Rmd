@@ -1,0 +1,456 @@
+---
+title: "HSAEC1-KT_RNA_seq_R_analysis"
+author: "Riley Risteen"
+date: "2024-07-11"
+output: html_document
+---
+this code is for comparing gene expression between uninfected and infected samples of a single strain at a single time point 
+
+
+define functions
+```{R message=FALSE, warning=FALSE}
+#other stuff
+calculate_TPM <- function(counts.mat, counts.orig){
+  gene_length <- counts.orig %>% select('Name', 'genelength') %>% unique
+  for (i in 1:ncol(counts.mat)){
+    counts.mat[,i] <- counts.mat[,i]/gene_length[,2]
+    counts.mat[,i] <- counts.mat[,i]/(sum(counts.mat[,i])/1000000)
+  }
+  return(counts.mat)
+}
+
+factor_groups <- function(GROUPS){
+  for(col in colnames(GROUPS)){
+    GROUPS[[col]] = factor(GROUPS[[col]], levels = unique(GROUPS[[col]]))
+  }
+  
+  return(GROUPS)
+}
+
+
+unnest_dataframes <- function(x) {
+  y <- do.call(data.frame, x)
+  if("data.frame" %in% sapply(y, class)) unnest_dataframes(y)
+    y
+    }
+
+```
+
+load packages
+```{R warning=FALSE}
+library(tidyverse)
+library(edgeR)
+library(readr)
+```
+
+retrieve files (your metadata file, your counts, and your reference GFF)
+```{R warning=FALSE}
+combined_counts <- read_delim("//joffrey-smb.igs.umaryland.edu/projects-t3/EFUNG/riley.risteen/Cb_HSAEC1-KT_inf/counts/master_count_table.counts", 
+                              delim = "\t", escape_double = FALSE, 
+                              col_names = FALSE, trim_ws = TRUE)
+
+metadata <- read_delim("//joffrey-smb.igs.umaryland.edu/home/riley.risteen/Cb_hsaec_inf_rnaseq/hsaec1-kt_cb_inf_sample_metadata.csv", 
+                       delim = ",", escape_double = FALSE, 
+                       col_names = TRUE, trim_ws = TRUE)
+
+genome_gff <- read_delim("//joffrey-smb.igs.umaryland.edu/projects-t3/EFUNG/riley.risteen/GRCh38_latest_genomic.genes_only.gff", 
+                         delim = "\t", escape_double = FALSE, 
+                         col_names = FALSE, trim_ws = TRUE)
+#If the GFF won't load, try filtering out all rows that are not genes (exons, scRNA, etc) in shell and put only the rows containing genes into a new file. Then import that smaller file into R.
+
+```
+
+prepare genome GFF file
+```{r, echo=FALSE}
+genome_gff <- genome_gff %>% separate('X9', into = c("Name", "X9"), sep = ';', extra = "merge")
+
+genome_gff$Name <- gsub(".*:", "", genome_gff$Name)
+genome_gff$Name <- gsub(".*=", "", genome_gff$Name)
+
+#strapplyc(string, ":(.*)", simplify = TRUE)
+
+genome_gff$X9 <- gsub(".*:", "", genome_gff$X9)
+genome_gff$X9 <- gsub(".*=", "", genome_gff$X9)
+
+genome_gff <- genome_gff %>% dplyr::select("X4", "X5", "Name")
+
+genome_gff$genelength <- genome_gff$X5-genome_gff$X4
+```
+
+create empty lists to put dataframes into (to keep them organized)
+```{r}
+#create a list to put metadata dfs filtered by strain/time into 
+filt_metadata <- list()
+
+#create a list to put calculated TPMs into 
+tpm_dfs <- list()
+```
+
+
+create count matrix for each strain by filtering the metadata file
+```{r, echo=FALSE}
+str_spec_metadata <- list()
+str_spec_metadata$metadata_Cb175 <- metadata %>% filter(strain =="Cb175")
+Cb175_counts <- combined_counts[combined_counts$X3 %in% str_spec_metadata$metadata_Cb175$sample,] 
+Cb175_counts <- Cb175_counts[!grepl("__", Cb175_counts$X1),] #remove extra lines that don't contain count data, just information about stuff 
+
+#repeat for other strain
+str_spec_metadata$metadata_Cb182 <- metadata %>% filter(strain =="Cb182")
+Cb182_counts <- combined_counts[combined_counts$X3 %in% str_spec_metadata$metadata_Cb182$sample,] 
+Cb182_counts <- Cb182_counts[!grepl("__", Cb182_counts$X1),]
+```
+
+###PROCESSING FIRST STRAIN
+
+create a matrix from the count data with each gene as a column and each sample as a row
+```{r, echo=FALSE}
+colnames(Cb175_counts) <- c("Name","counts","replicate")
+Cb175_counts <- dplyr::inner_join(Cb175_counts, genome_gff, by = "Name") %>% arrange(replicate, Name)
+
+#remove the unnecessary columns from that matrix that you made
+Cb175_counts.matrix <- pivot_wider(Cb175_counts, names_from = replicate, values_from = counts) %>% column_to_rownames("Name") %>% select(-"X4", -"X5", -"genelength") 
+
+```
+
+calculate transcripts per million to normalize (in case you want to make heatmaps later on)
+```{r, echo=FALSE}
+Cb175_counts <- Cb175_counts[(Cb175_counts$Name %in% rownames(Cb175_counts.matrix)),]
+
+if(all(rownames(Cb175_counts.matrix) == unique(Cb175_counts$Name))){ ## Makes sure the genes are in the same order for the correct division
+  tpm_dfs$Cb175 <- calculate_TPM(counts.mat = Cb175_counts.matrix, counts.orig = Cb175_counts)
+}else{
+  message('The genes are not in the same order')
+}
+```
+
+split data by time point 
+```{r, echo=FALSE}
+#split counts matrix into 3h and 6h matrices
+Cb175_3h_matrix <- Cb175_counts.matrix %>% dplyr:: select(grep("3h", names(Cb175_counts.matrix)))
+Cb175_6h_matrix <- Cb175_counts.matrix %>% dplyr:: select(grep("6h", names(Cb175_counts.matrix)))
+rm(Cb175_counts.matrix)
+
+#create metadata files for 3h and 6h samples
+filt_metadata$Cb175_3h <- metadata %>% filter(strain =="Cb175" & time_point == "3h")
+filt_metadata$Cb175_6h <- metadata %>% filter(strain =="Cb175" & time_point == "6h")
+filt_metadata$Cb175_3h <- factor_groups(filt_metadata$Cb175_3h)
+filt_metadata$Cb175_6h <- factor_groups(filt_metadata$Cb175_6h)
+```
+
+Relevel the metadata file so that (much later down the line) the infected samples are compared to the uninfected samples (instead of vice versa). That way, positive FC will indicate upregulation in infected samples. 
+```{R message=FALSE}
+#first, ensure your infected samples come before your control samples in your metadata file
+treatment_name <- "I"
+control_name <- "UI"
+
+order_x <- c(treatment_name, control_name)
+filt_metadata$Cb175_3h <- filt_metadata$Cb175_3h %>% 
+  mutate(infec_status = factor(infec_status, levels = order_x)) %>% arrange(infec_status)
+filt_metadata$Cb175_6h <- filt_metadata$Cb175_6h %>% 
+  mutate(infec_status = factor(infec_status, levels = order_x)) %>% arrange(infec_status)
+
+#now relevel the factors in the group column
+filt_metadata$Cb175_3h$group <- relevel(filt_metadata$Cb175_3h$group, "Cb175_UI_3h")
+filt_metadata$Cb175_6h$group <- relevel(filt_metadata$Cb175_6h$group, "Cb175_UI_6h")
+
+#Specifically, this sets "Cb175_UI_6h" as factor 1 in the $group column. This is necessary because the model.matrix command sets factor 1 to be the intercept, which is what the control group should be. FC of coefficient (treatment) is relative to intercept (control). See the section 5.2 at the following website for more information: 
+#     https://bioconductor.org/packages/devel/workflows/vignettes/RNAseq123/inst/doc/designmatrices.html#study-of-treatments-and-control-1 
+```
+
+
+determine differential expression for 3h dataset
+```{r, echo=FALSE}
+#define cutoffs
+FDRcutoff <- 0.05
+cpm.cutoff <- 5/min(colSums(Cb175_3h_matrix)) * 1000000 ## list minimum counts per million
+
+print(paste0(nrow(Cb175_3h_matrix)," total genes"))
+y_3h <- edgeR::DGEList(counts = Cb175_3h_matrix, group = filt_metadata$Cb175_3h$group)
+y_3h <- edgeR::calcNormFactors(y_3h)
+
+#filter out genes that are not expressed in most samples from the original counts matrix
+keep <- rowSums(cpm(y_3h) >= cpm.cutoff) >= min(table(filt_metadata$Cb175_3h$group)) ## is the cpm > than cutoff in three or more replicates
+keep.df <- as.data.frame(table(keep))
+print(paste0(keep.df[keep.df[,1] == F,2]," genes excluded using edgeR filter"))
+y_3h <- y_3h[keep, , keep.lib.sizes = F] ## Selects genes in y that are in keep
+
+#do the actual DE analysis
+design_3h <- model.matrix(~filt_metadata$Cb175_3h$group)
+y_3h <- estimateDisp(y_3h , design_3h)
+fit_3h <- edgeR::glmQLFit(y_3h, design_3h) 
+qlf_3h <- edgeR::glmQLFTest(fit_3h, coef = 2)
+FDR_3h <- as.data.frame(p.adjust(qlf_3h$table$PValue, method="BH")) ## Takes pvalue from above and correct using FDR method
+rownames(FDR_3h) <- rownames(qlf_3h$table)
+colnames(FDR_3h) <- FDR_3h
+degenes_Cb175_3h <- rownames(FDR_3h[FDR_3h[,1] < FDRcutoff, , drop = F]) ## Select genes with FDR less than FDR cutoff
+print(paste0(length(degenes_Cb175_3h)," differentially expressed genes in 3h samples"))
+```
+
+
+determine differential expression for 6h dataset
+```{r, echo=FALSE}
+FDRcutoff <- 0.05
+cpm.cutoff <- 5/min(colSums(Cb175_6h_matrix)) * 1000000 ## list minimum counts per million
+print(paste0(nrow(Cb175_6h_matrix)," total genes"))
+y_6h <- edgeR::DGEList(counts = Cb175_6h_matrix, group = filt_metadata$Cb175_6h$group)
+y_6h <- edgeR::calcNormFactors(y_6h)
+keep <- rowSums(cpm(y_6h) >= cpm.cutoff) >= min(table(filt_metadata$Cb175_6h$group)) ## is the cpm > than cutoff in two or more replicates
+keep.df <- as.data.frame(table(keep))
+print(paste0(keep.df[keep.df[,1] == F,2]," genes excluded using edgeR filter"))
+y_6h <- y_6h[keep, , keep.lib.sizes = F] ## Selects genes in y that are in keep
+design_6h <- model.matrix(~filt_metadata$Cb175_6h$group)
+y_6h <- estimateDisp(y_6h , design_6h)
+fit_6h <- edgeR::glmQLFit(y_6h, design_6h) 
+qlf_6h <- edgeR::glmQLFTest(fit_6h, coef = 2)
+FDR_6h <- as.data.frame(p.adjust(qlf_6h$table$PValue, method="BH")) ## Takes pvalue from above and correct using FDR method
+rownames(FDR_6h) <- rownames(qlf_6h$table)
+colnames(FDR_6h) <- FDR_6h
+degenes_Cb175_6h <- rownames(FDR_6h[FDR_6h[,1] < FDRcutoff, , drop = F]) ## Select genes with FDR less than FDR cutoff
+print(paste0(length(degenes_Cb175_6h)," differentially expressed genes in 6h samples"))
+```
+
+double check coefficient is correct
+```{r, echo=FALSE}
+print(paste0("3 hr experimental group: ", qlf_3h[["comparison"]]))
+print(paste0("6 hr experimental group: ", qlf_6h[["comparison"]]))
+```
+
+
+write results to new tables and add a column for FDR
+```{r, echo=FALSE}
+#write results to new table
+comparison_stats_3h <- as.data.frame(qlf_3h$table)
+comparison_stats_6h <- as.data.frame(qlf_6h$table)
+
+#takes pvalues from original qlf tables and calculates FDR
+comparison_stats_3h$FDR_3h <- as.data.frame(p.adjust(qlf_3h$table$PValue, method="BH")) 
+comparison_stats_6h$FDR_6h <- as.data.frame(p.adjust(qlf_6h$table$PValue, method="BH"))
+
+#need to convert rownames (the genes) to first column so we don't lose it while unnesting
+comparison_stats_3h <- cbind(rownames(comparison_stats_3h), data.frame(comparison_stats_3h, row.names=NULL)) %>% `names<-`(replace(names(.), 1, c('genes')))
+comparison_stats_6h <- cbind(rownames(comparison_stats_6h), data.frame(comparison_stats_6h, row.names=NULL)) %>% `names<-`(replace(names(.), 1, c('genes')))
+
+#un-nest the resulting tables
+comparison_stats_3h <- unnest_dataframes(comparison_stats_3h)
+comparison_stats_6h <- unnest_dataframes(comparison_stats_6h)
+
+#make the genes the row names again
+comparison_stats_3h <- comparison_stats_3h %>% remove_rownames %>% column_to_rownames(var="genes") 
+comparison_stats_6h <- comparison_stats_6h %>% remove_rownames %>% column_to_rownames(var="genes") 
+
+#rename the FDR columns so that they are properly labeled
+colnames(comparison_stats_3h)[5] = "FDR_Cb175_3h"
+colnames(comparison_stats_6h)[5] = "FDR_Cb175_6h"
+
+```
+
+rename columns (so that they have different names between tables)
+```{r, echo=FALSE}
+comparison_stats_3h <- comparison_stats_3h %>% 
+        rename("logFC_Cb175_3h" = "logFC",
+               "logCPM_Cb175_3h" = "logCPM",
+               "F_Cb175_3h" = "F",
+               "PVal_Cb175_3h" = "PValue")
+comparison_stats_6h <- comparison_stats_6h %>% 
+        rename("logFC_Cb175_6h" = "logFC",
+               "logCPM_Cb175_6h" = "logCPM",
+               "F_Cb175_6h" = "F",
+               "PVal_Cb175_6h" = "PValue")
+```
+
+
+merge the 3h and 6h tables
+```{r, echo=FALSE}
+Cb175_DE_data <- merge(comparison_stats_3h, comparison_stats_6h, by = "row.names", all.x = TRUE, all.y = TRUE)
+rm(comparison_stats_3h)
+rm(comparison_stats_6h)
+```
+
+
+###PROCESSING SECOND STRAIN
+```{r, echo=FALSE}
+##create a matrix from the count data with each gene as a column and each sample as a row
+colnames(Cb182_counts) <- c("Name","counts","replicate")
+Cb182_counts <- dplyr::inner_join(Cb182_counts, genome_gff, by = "Name") %>% arrange(replicate, Name)
+#remove the unnecessary columns from that matrix that you made
+Cb182_counts.matrix <- pivot_wider(Cb182_counts, names_from = replicate, values_from = counts) %>% column_to_rownames("Name") %>% select(-"X4", -"X5", -"genelength") 
+
+
+##calculate transcripts per million to normalize (in case you want to make heatmaps later on)
+Cb182_counts <- Cb182_counts[(Cb182_counts$Name %in% rownames(Cb182_counts.matrix)),]
+if(all(rownames(Cb182_counts.matrix) == unique(Cb182_counts$Name))){ ## Makes sure the genes are in the same order for the correct division
+  tpm_dfs$Cb182 <- calculate_TPM(counts.mat = Cb182_counts.matrix, counts.orig = Cb182_counts)
+}else{
+  message('The genes are not in the same order')
+}
+
+
+##split data by time point 
+#split counts matrix into 3h and 6h matrices
+Cb182_3h_matrix <- Cb182_counts.matrix %>% dplyr:: select(grep("3h", names(Cb182_counts.matrix)))
+Cb182_6h_matrix <- Cb182_counts.matrix %>% dplyr:: select(grep("6h", names(Cb182_counts.matrix)))
+rm(Cb182_counts.matrix)
+#create metadata files for 3h and 6h samples
+filt_metadata$Cb182_3h <- metadata %>% filter(strain =="Cb182" & time_point == "3h")
+filt_metadata$Cb182_6h <- metadata %>% filter(strain =="Cb182" & time_point == "6h")
+filt_metadata$Cb182_3h <- factor_groups(filt_metadata$Cb182_3h)
+filt_metadata$Cb182_6h <- factor_groups(filt_metadata$Cb182_6h)
+
+
+##Relevel the metadata file so that (much later down the line) the infected samples are compared to the uninfected samples (instead of vice versa). That way, positive FC will indicate upregulation in infected samples. 
+#first, ensure your infected samples come before your control samples in your metadata file
+treatment_name <- "I"
+control_name <- "UI"
+order_x <- c(treatment_name, control_name)
+filt_metadata$Cb182_3h <- filt_metadata$Cb182_3h %>% 
+  mutate(infec_status = factor(infec_status, levels = order_x)) %>% arrange(infec_status)
+filt_metadata$Cb182_6h <- filt_metadata$Cb182_6h %>% 
+  mutate(infec_status = factor(infec_status, levels = order_x)) %>% arrange(infec_status)
+#now relevel the factors in the group column
+filt_metadata$Cb182_3h$group <- relevel(filt_metadata$Cb182_3h$group, "Cb182_UI_3h")
+filt_metadata$Cb182_6h$group <- relevel(filt_metadata$Cb182_6h$group, "Cb182_UI_6h")
+
+
+##determine differential expression for 3h dataset
+#define cutoffs
+FDRcutoff <- 0.05
+cpm.cutoff <- 5/min(colSums(Cb182_3h_matrix)) * 1000000 ## list minimum counts per million
+print(paste0(nrow(Cb182_3h_matrix)," total genes"))
+y_3h <- edgeR::DGEList(counts = Cb182_3h_matrix, group = filt_metadata$Cb182_3h$group)
+y_3h <- edgeR::calcNormFactors(y_3h)
+#filter out genes that are not expressed in most samples from the original counts matrix
+keep <- rowSums(cpm(y_3h) >= cpm.cutoff) >= min(table(filt_metadata$Cb182_3h$group)) ## is the cpm > than cutoff in three or more replicates
+keep.df <- as.data.frame(table(keep))
+print(paste0(keep.df[keep.df[,1] == F,2]," genes excluded using edgeR filter"))
+y_3h <- y_3h[keep, , keep.lib.sizes = F] ## Selects genes in y that are in keep
+#do the actual DE analysis
+design_3h <- model.matrix(~filt_metadata$Cb182_3h$group)
+y_3h <- estimateDisp(y_3h , design_3h)
+fit_3h <- edgeR::glmQLFit(y_3h, design_3h) 
+qlf_3h <- edgeR::glmQLFTest(fit_3h, coef = 2)
+FDR_3h <- as.data.frame(p.adjust(qlf_3h$table$PValue, method="BH")) ## Takes pvalue from above and correct using FDR method
+rownames(FDR_3h) <- rownames(qlf_3h$table)
+colnames(FDR_3h) <- FDR_3h
+degenes_Cb182_3h <- rownames(FDR_3h[FDR_3h[,1] < FDRcutoff, , drop = F]) ## Select genes with FDR less than FDR cutoff
+print(paste0(length(degenes_Cb182_3h)," differentially expressed genes in 3h samples"))
+
+
+##determine differential expression for 6h dataset
+FDRcutoff <- 0.05
+cpm.cutoff <- 5/min(colSums(Cb182_6h_matrix)) * 1000000 ## list minimum counts per million
+print(paste0(nrow(Cb182_6h_matrix)," total genes"))
+y_6h <- edgeR::DGEList(counts = Cb182_6h_matrix, group = filt_metadata$Cb182_6h$group)
+y_6h <- edgeR::calcNormFactors(y_6h)
+keep <- rowSums(cpm(y_6h) >= cpm.cutoff) >= min(table(filt_metadata$Cb182_6h$group)) ## is the cpm > than cutoff in two or more replicates
+keep.df <- as.data.frame(table(keep))
+print(paste0(keep.df[keep.df[,1] == F,2]," genes excluded using edgeR filter"))
+y_6h <- y_6h[keep, , keep.lib.sizes = F] ## Selects genes in y that are in keep
+design_6h <- model.matrix(~filt_metadata$Cb182_6h$group)
+y_6h <- estimateDisp(y_6h , design_6h)
+fit_6h <- edgeR::glmQLFit(y_6h, design_6h) 
+qlf_6h <- edgeR::glmQLFTest(fit_6h, coef = 2)
+FDR_6h <- as.data.frame(p.adjust(qlf_6h$table$PValue, method="BH")) ## Takes pvalue from above and correct using FDR method
+rownames(FDR_6h) <- rownames(qlf_6h$table)
+colnames(FDR_6h) <- FDR_6h
+degenes_Cb182_6h <- rownames(FDR_6h[FDR_6h[,1] < FDRcutoff, , drop = F]) ## Select genes with FDR less than FDR cutoff
+print(paste0(length(degenes_Cb182_6h)," differentially expressed genes in 6h samples"))
+
+
+##double check coefficient is correct
+#topTags(qlf_3h)
+#topTags(qlf_6h)
+print(paste0("3 hr experimental group: ", qlf_3h[["comparison"]]))
+print(paste0("6 hr experimental group: ", qlf_6h[["comparison"]]))
+
+
+##write results to new tables and add a column for FDR
+#write results to new table
+comparison_stats_3h <- as.data.frame(qlf_3h$table)
+comparison_stats_6h <- as.data.frame(qlf_6h$table)
+#takes pvalues from original qlf tables and calculates FDR
+comparison_stats_3h$FDR_3h <- as.data.frame(p.adjust(qlf_3h$table$PValue, method="BH")) 
+comparison_stats_6h$FDR_6h <- as.data.frame(p.adjust(qlf_6h$table$PValue, method="BH"))
+#need to convert rownames to first column so we dont lose it while unnesting
+comparison_stats_3h <- cbind(rownames(comparison_stats_3h), data.frame(comparison_stats_3h, row.names=NULL)) %>% `names<-`(replace(names(.), 1, c('genes')))
+comparison_stats_6h <- cbind(rownames(comparison_stats_6h), data.frame(comparison_stats_6h, row.names=NULL)) %>% `names<-`(replace(names(.), 1, c('genes')))
+#un-nest the resulting tables
+comparison_stats_3h <- unnest_dataframes(comparison_stats_3h)
+comparison_stats_6h <- unnest_dataframes(comparison_stats_6h)
+#make the genes the row names again
+comparison_stats_3h <- comparison_stats_3h %>% remove_rownames %>% column_to_rownames(var="genes") 
+comparison_stats_6h <- comparison_stats_6h %>% remove_rownames %>% column_to_rownames(var="genes") 
+#rename the FDR columns so that they are properly labled
+colnames(comparison_stats_3h)[5] = "FDR_Cb182_3h"
+colnames(comparison_stats_6h)[5] = "FDR_Cb182_6h"
+
+
+##rename columns (so that they have different names between tables)
+comparison_stats_3h <- comparison_stats_3h %>% 
+        rename("logFC_Cb182_3h" = "logFC",
+               "logCPM_Cb182_3h" = "logCPM",
+               "F_Cb182_3h" = "F",
+               "PVal_Cb182_3h" = "PValue")
+comparison_stats_6h <- comparison_stats_6h %>% 
+        rename("logFC_Cb182_6h" = "logFC",
+               "logCPM_Cb182_6h" = "logCPM",
+               "F_Cb182_6h" = "F",
+               "PVal_Cb182_6h" = "PValue")
+
+
+##merge the 3h and 6h tables
+Cb182_DE_data <- merge(comparison_stats_3h, comparison_stats_6h, by = "row.names", all.x = TRUE, all.y = TRUE)
+rm(comparison_stats_3h)
+rm(comparison_stats_6h)
+```
+
+###MERGING THE DATA FROM BOTH STRAINS
+merge the differential expression tables
+```{r, echo=FALSE}
+all_DE_data <- full_join(Cb175_DE_data,Cb182_DE_data)
+all_DE_data <- all_DE_data %>% rename("Gene" = "Row.names" )
+```
+
+remove "gene-" from the row names
+```{r, echo=FALSE}
+DE_data <- all_DE_data
+DE_data$Gene <- gsub("gene-","", DE_data$Gene)
+
+#remove the version with the gene prefix, if desired
+#rm(all_DE_data)
+```
+
+Export the file as a csv. 
+```{r, echo=FALSE}
+write.table(DE_data, file = "C:\\Users\\Riley\\Documents\\University of Maryland\\Bruno Lab\\Host_RNA_seq\\FINAL_DATA_AND_CODE\\HSAEC1-KT_all_Cb_inf_DE_Genes.csv", sep = ",", col.names = TRUE, row.names = F, quote = FALSE)
+```
+
+#Export count tables (raw and tpm)
+merge all of the raw counts and export the table
+```{r}
+rawcountslist <- list(Cb175_3h_matrix, Cb175_6h_matrix, Cb182_3h_matrix, Cb182_6h_matrix, Cb190_3h_matrix, Cb190_6h_matrix)
+
+for (i in 1:length(rawcountslist)) {
+  rawcountslist[[i]] <- rownames_to_column(rawcountslist[[i]], var = "gene")
+}
+
+rawcounts <- rawcountslist %>% reduce(full_join, by = 'gene')
+
+rawcounts$gene <- gsub("gene-","", rawcounts$gene)
+
+write.table(rawcounts, file = "C:\\Users\\Riley\\Documents\\University of Maryland\\Bruno Lab\\Host_RNA_seq\\FINAL_DATA_AND_CODE\\HSAEC1-KT_raw_counts.csv", sep = ",", col.names = TRUE, row.names = F, quote = FALSE)
+
+rm(rawcountslist)
+```
+
+merge all of the tpm counts and export the table
+```{r}
+for (i in 1:length(tpm_dfs)) {
+  tpm_dfs[[i]] <- rownames_to_column(tpm_dfs[[i]], var = "gene")
+}
+
+tpm_counts <- tpm_dfs %>% reduce(full_join, by = 'gene')
+
+tpm_counts$gene <- gsub("gene-","", tpm_counts$gene)
+
+write.table(tpm_counts, file = "C:\\Users\\Riley\\Documents\\University of Maryland\\Bruno Lab\\Host_RNA_seq\\FINAL_DATA_AND_CODE\\HSAEC1-KT_tpm_counts.csv", sep = ",", col.names = TRUE, row.names = F, quote = FALSE)
+```
